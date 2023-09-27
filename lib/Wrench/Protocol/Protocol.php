@@ -259,14 +259,7 @@ abstract class Protocol
      */
     public function generateKey()
     {
-        if (extension_loaded('openssl')) {
-            $key = openssl_random_pseudo_bytes(16);
-        } else {
-            // SHA1 is 128 bit (= 16 bytes)
-            $key = sha1(spl_object_hash($this) . mt_rand(0, PHP_INT_MAX) . uniqid('', true), true);
-        }
-
-        return base64_encode($key);
+        return base64_encode(\random_bytes(16));
     }
 
     /**
@@ -411,24 +404,37 @@ abstract class Protocol
             return false;
         }
 
-        $headers = $this->getHeaders($response);
+        $statusCode = $this->getStatusCode($response);
 
-        if (!isset($headers[self::HEADER_ACCEPT])) {
-            throw new HandshakeException('No accept header receieved on handshake response');
+        if (self::HTTP_SWITCHING_PROTOCOLS !== $statusCode) {
+            $errorMessage = \explode("\n", \trim($this->getBody($response)), 2)[0];
+
+            throw new HandshakeException(\trim(\sprintf('Expected handshake response status code %d, but received %d. %s', self::HTTP_SWITCHING_PROTOCOLS, $statusCode, $errorMessage)));
         }
 
-        $accept = $headers[self::HEADER_ACCEPT];
+        $acceptHeaderValue = $this->getHeaders($response)[self::HEADER_ACCEPT] ?? '';
 
-        if (!$accept) {
-            throw new HandshakeException('Invalid accept header');
+        if ('' === $acceptHeaderValue) {
+            throw new HandshakeException('No accept header received on handshake response');
         }
 
-        $expected = $this->getAcceptValue($key);
+        return $this->getEncodedHash($key) === $acceptHeaderValue;
+    }
 
-        preg_match('#Sec-WebSocket-Accept:\s(.*)$#imU', $response, $matches);
-        $keyAccept = trim($matches[1]);
+    /**
+     * Gets the status code from a full response.
+     *
+     * If there is no status line, we return 0.
+     *
+     * @return int
+     */
+    protected function getStatusCode($response)
+    {
+        [$statusLine] = \explode("\r\n", $response, 2);
 
-        return ($keyAccept === $this->getEncodedHash($key)) ? true : false;
+        [$protocol, $statusCode] = \explode(' ', $response, 2);
+
+        return (int) $statusCode;
     }
 
     /**
@@ -712,22 +718,32 @@ abstract class Protocol
 
         $return = array();
         foreach (explode("\r\n", $headers) as $header) {
-            $parts = explode(': ', $header, 2);
+            $parts = explode(':', $header, 2);
             if (count($parts) == 2) {
                 list($name, $value) = $parts;
                 if (!isset($return[$name])) {
-                    $return[$name] = $value;
+                    $return[$name] = trim($value);
                 } else {
                     if (is_array($return[$name])) {
-                        $return[$name][] = $value;
+                        $return[$name][] = trim($value);
                     } else {
-                        $return[$name] = array($return[$name], $value);
+                        $return[$name] = array($return[$name], trim($value));
                     }
                 }
             }
         }
 
         return array_change_key_case($return);
+    }
+
+     /**
+     * Gets the body from a full response.
+     *
+     * @return string
+     */
+    protected function getBody($response)
+    {
+        return \explode("\r\n\r\n", $response, 2)[1] ?? '';
     }
 
     /**
